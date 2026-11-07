@@ -48,5 +48,14 @@ void hv_pvg_lite_complete(HvPvgLite *p, uint32_t channel, uint32_t stamp);
 /* The size macOS is told its screen is. Set before the machine starts; default 1920 x 1080. */
 void hv_pvg_lite_set_mode(uint32_t width, uint32_t height);
 void hv_pvg_lite_set_size_mm(uint32_t width_mm, uint32_t height_mm);
+/* A screen's mode, with the physical size that sets its density (0 mm: the usual 400 mm wide)
+   and refresh rate. Before the guest names its display page it becomes the boot mode; after,
+   it is offered through the hot-plug handshake as a new sequence number the guest acks
+   (hv_pvg_lite_mode_acked says which it last acked). p may be NULL before the device exists. */
+void hv_pvg_lite_request_mode(HvPvgLite *p, uint32_t width, uint32_t height, uint32_t width_mm, uint32_t height_mm, uint32_t hz);
+uint32_t hv_pvg_lite_mode_acked(HvPvgLite *p);
+/* The mode the guest last accepted (acked), and whether it was a monitor's (offered with a
+   physical size; the phone's own mode has none). Before any ack, the mode it booted with. */
+void hv_pvg_lite_accepted_mode(HvPvgLite *p, uint32_t *width, uint32_t *height, int *monitor);
 
 #endif

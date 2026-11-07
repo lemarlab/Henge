@@ -136,6 +136,9 @@ long henge_share_agent_seen(void) { return hv_share_agent_seen(); }
 
 void henge_vm_set_display(uint32_t width, uint32_t height) { hv_pvg_lite_set_mode(width, height); }
 void henge_vm_set_display_mm(uint32_t width_mm, uint32_t height_mm) { hv_pvg_lite_set_size_mm(width_mm, height_mm); }
+void henge_vm_request_display_mode(uint32_t width, uint32_t height, uint32_t width_mm, uint32_t height_mm, uint32_t hz) {
+    hv_vm_request_display_mode(width, height, width_mm, height_mm, hz);
+}
 
 void henge_vm_key(uint16_t code, int down) { if (state == 1) hv_vm_key(code, down); }
 void henge_vm_key_hid(uint8_t usage, int down) { if (state == 1) hv_vm_key_hid(usage, down); }

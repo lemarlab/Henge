@@ -8,17 +8,14 @@ struct ExternalMacDisplay: View {
     var surface = UUID()
 
     var body: some View {
-        GeometryReader { geometry in
-            let aspect = presentation.aspect
-            let width = min(geometry.size.width, geometry.size.height * aspect)
-            BootDisplay(display: presentation.display, role: .external, surface: surface)
-                .frame(width: width, height: width / aspect)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(.black)
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-        .preferredColorScheme(.dark)
+        // The whole screen: the engine draws into every pixel of it and fits the Mac's frame inside
+        // (devices/pvg_present.h), so a monitor's own mode fills it and any other shape gets black bars.
+        BootDisplay(display: presentation.display, role: .external, surface: surface)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .preferredColorScheme(.dark)
     }
 }
 

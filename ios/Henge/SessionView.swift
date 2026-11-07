@@ -499,12 +499,13 @@ struct SessionView: View {
         var buffer = [CChar](repeating: 0, count: 256)
         Sharing.prepare()
         EngineTuning.apply()
-        henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
-        if mac.isRetina {
-            henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
-        } else {
-            henge_vm_set_display_mm(0, 0)
-        }
+        // The Mac's own mode (an iPad's Retina panel with its real size, so macOS picks HiDPI; the
+        // refresh rate EngineTuning chose), or a monitor's if one already shows it; a monitor
+        // arriving later asks for its own and hands this one back when it goes (DisplayRouter).
+        let retinaMM = mac.isRetina ? Device.retinaMM : (width: 0, height: 0)
+        let hz = Int(ProcessInfo.processInfo.environment["HV_HZ"] ?? "") ?? 60
+        display.bootMode = DisplayMode(width: mac.screen.width, height: mac.screen.height, hz: hz,
+                                       widthMM: retinaMM.width, heightMM: retinaMM.height, scale: mac.isRetina ? 2 : 1)
         HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
         let rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
         if rc != 0 {

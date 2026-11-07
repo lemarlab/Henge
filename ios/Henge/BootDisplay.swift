@@ -100,7 +100,16 @@ private struct GPUScreen: UIViewRepresentable {
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
+            // Apple QA1909: a Metal layer's pixels should be the screen's own, so set the native scale.
+            if let screen = window?.screen { contentScaleFactor = screen.nativeScale }
             if window == nil { detach() } else { attachIfReady() }
+        }
+
+        /// A monitor's pixels and refresh rate, for the mode it asks of the Mac.
+        private var screenPixels: ScreenPixels? {
+            guard role == .external, let screen = window?.screen else { return nil }
+            let px = screen.nativeBounds.size
+            return ScreenPixels(width: Int(px.width), height: Int(px.height), hz: screen.maximumFramesPerSecond)
         }
 
         override func layoutSubviews() {
@@ -114,7 +123,7 @@ private struct GPUScreen: UIViewRepresentable {
             if !attached {
                 attached = true
                 lastSize = bounds.size
-                display.connect(id, layer: metal, role: role)
+                display.connect(id, layer: metal, role: role, screen: screenPixels)
             } else if lastSize != bounds.size {
                 lastSize = bounds.size
                 display.refresh(id)

@@ -33,6 +33,8 @@ HvCpu *hv_vm_cpu(int index);
 extern void (*hv_prof_register)(void); /* debugging: each thread that will run guest code calls this */
 /* Frames go to this CAMetalLayer, drawn by the GPU, instead of hv_vm_boot_display. */
 void hv_vm_set_display_layer(void *layer);
+/* A screen's mode for the Mac: before boot it is the boot mode; after, it is offered to the guest (pvg_lite.h). */
+void hv_vm_request_display_mode(uint32_t width, uint32_t height, uint32_t width_mm, uint32_t height_mm, uint32_t hz);
 uint64_t hv_vm_gpu_frames(void);
 int hv_vm_ncpus(void);
 

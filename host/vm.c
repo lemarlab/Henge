@@ -217,6 +217,11 @@ void hv_vm_set_display_layer(void *layer) {
     if (previous) CFRelease(previous);
 }
 
+void hv_vm_request_display_mode(uint32_t width, uint32_t height, uint32_t width_mm, uint32_t height_mm, uint32_t hz) {
+    HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
+    hv_pvg_lite_request_mode(pvg, width, height, width_mm, height_mm, hz); /* NULL before the board: the boot mode */
+}
+
 uint64_t hv_vm_gpu_frames(void) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
     return pvg ? hv_pvg_lite_gpu_frames(pvg) : 0;

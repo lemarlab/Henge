@@ -54,6 +54,10 @@ struct HvPvgLite {
     uint32_t root_rp, status, chan_pending;
     int root_pending, iosfc_pending;
     uint64_t display_pa;
+    uint32_t display_seq;   /* the mode list's sequence number the guest was last told */
+    uint32_t mode_acked;    /* the sequence number the guest last acked */
+    uint64_t offered[8];    /* the mode told as each recent sequence number (seq % 8), packed by mode_packed */
+    uint64_t accepted;      /* the mode of the sequence number last acked, or the boot mode; 0 before a page */
     uint64_t swaps;
     /* The last stamp handed to the worker per channel, and who is being drained. */
     uint32_t submitted[MAX_CHANNELS];
@@ -139,55 +143,97 @@ static void ring_read(HvPvgLite *p, const uint32_t *table, uint32_t size, uint32
     }
 }
 
-/* The one mode the display offers. macOS takes the size it is given at boot. */
-static uint32_t display_w = 1920, display_h = 1080;
-/* The panel's real size, when known: macOS works out the pixel density from it and
-   picks HiDPI (2x) for a Retina-dense panel, as on a real Mac. 0 = the old 400 mm. */
-static uint32_t display_mm_w, display_mm_h;
+/* The one mode the display offers, and its physical size, which sets the density macOS reads
+   (HiDPI from about 192 ppi). A width of 0 mm means the old rule: 400 mm wide at any shape,
+   the same density the phone's own screen has always been given. macOS takes the mode it is
+   given at boot; a mode offered later goes through the hot-plug handshake (hv_pvg_lite_request_mode). */
+static uint32_t display_w = 1920, display_h = 1080, display_mm_w, display_mm_h, display_hz = 60;
 
+void hv_pvg_lite_set_mode(uint32_t width, uint32_t height) {
+    display_w = width;
+    display_h = height;
+    display_mm_w = display_mm_h = 0;
+    const char *hz = getenv("HV_HZ"); /* m4 fork: 120 Hz on ProMotion, so WindowServer animates at the panel's rate */
+    display_hz = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
+}
+
+/* The boot mode's physical size (after hv_pvg_lite_set_mode): a Retina-dense panel makes macOS pick HiDPI. */
 void hv_pvg_lite_set_size_mm(uint32_t width_mm, uint32_t height_mm) {
     display_mm_w = width_mm;
     display_mm_h = height_mm;
 }
 
-void hv_pvg_lite_set_mode(uint32_t width, uint32_t height) {
-    display_w = width;
-    display_h = height;
+/* The mode being offered as one value: width, height, and whether it is a monitor's (a physical size). */
+static uint64_t mode_packed(void) {
+    return (uint64_t)display_w | (uint64_t)display_h << 24 | (uint64_t)(display_mm_w != 0) << 48;
+}
+
+#define PUT32(off, v) (*(uint32_t *)(d + (off)) = (uint32_t)(v))
+#define PUTF(off, v) (*(float *)(d + (off)) = (v))
+
+/* The mode list and physical size, told as sequence number seq, for the guest to ack. */
+static void display_offer_modes(uint8_t *d, uint32_t seq) {
+    uint32_t width_mm = display_mm_w, height_mm = display_mm_h;
+    if (!width_mm || !height_mm) width_mm = 400, height_mm = 400 * display_h / display_w;
+    PUT32(0x14, height_mm << 16 | width_mm);
+    PUTF(0x24, (float)width_mm);
+    PUTF(0x28, (float)height_mm);
+    PUT32(0x208, 1); /* one mode: */
+    PUT32(0x210, display_h << 16 | display_w);
+    PUT32(0x214, display_hz << 16);
+    PUT32(0x200, seq); /* the mode list's sequence number, which the guest acks */
+    d[0xfa9] = 1;      /* ack pending */
+    PUT32(0xfc0, 1);   /* state: told the guest, waiting for the ack */
+    __atomic_fetch_or((uint32_t *)(d + 0x100), 4, __ATOMIC_RELEASE); /* mode change: read when the guest sets its mask */
 }
 
 static void display_set_page(HvPvgLite *p, uint64_t pa) {
     uint8_t *d = hv_phys_ptr(p->m, pa, 0x4000);
     if (!d) return;
     p->display_pa = pa;
-#define PUT32(off, v) (*(uint32_t *)(d + (off)) = (uint32_t)(v))
-#define PUTF(off, v) (*(float *)(d + (off)) = (v))
+    p->display_seq = 1;
+    p->mode_acked = 0;
+    p->offered[1] = mode_packed();
+    __atomic_store_n(&p->accepted, p->offered[1], __ATOMIC_RELEASE); /* macOS takes the boot mode as given */
     PUT32(0x00, 1);
-    uint32_t width_mm = 400, height_mm = 400 * display_h / display_w; /* the same pixel density at any shape */
-    if (display_mm_w && display_mm_h) width_mm = display_mm_w, height_mm = display_mm_h;
-    PUT32(0x14, height_mm << 16 | width_mm);
     PUT32(0x18, 0x01000100);
     PUT32(0x1c, 0x400);
     PUT32(0x20, 3);
-    PUTF(0x24, (float)width_mm);
-    PUTF(0x28, (float)height_mm);
-    PUT32(0x208, 1); /* one mode: */
-    PUT32(0x210, display_h << 16 | display_w);
-    {   /* m4 fork: 120 Hz on ProMotion (HV_HZ), so WindowServer animates at the panel's rate */
-        const char *hz = getenv("HV_HZ");
-        uint32_t r = hz && atoi(hz) > 0 ? (uint32_t)atoi(hz) : 60;
-        PUT32(0x214, r << 16);
-    }
     PUTF(0xa10, 1.0f); /* identity colour matrix */
     PUTF(0xa24, 1.0f);
     PUTF(0xa38, 1.0f);
     d[0xa73] = 1;
-    PUT32(0x200, 1); /* the mode list's sequence number, which the guest acks */
-    d[0xfa9] = 1;    /* ack pending */
-    PUT32(0xfc0, 1); /* state: told the guest, waiting for the ack */
-    __atomic_store_n((uint32_t *)(d + 0x100), 4, __ATOMIC_RELEASE); /* mode change: read when the guest sets its mask */
+    display_offer_modes(d, 1);
+}
+
+void hv_pvg_lite_request_mode(HvPvgLite *p, uint32_t width, uint32_t height, uint32_t width_mm, uint32_t height_mm, uint32_t hz) {
+    if (!width || !height) return;
+    display_w = width, display_h = height;
+    display_mm_w = width_mm, display_mm_h = height_mm;
+    display_hz = hz ? hz : 60;
+    uint8_t *d = p && p->display_pa ? hv_phys_ptr(p->m, p->display_pa, 0x4000) : NULL;
+    if (!d) return; /* not booted yet: the page the guest names will carry it */
+    display_offer_modes(d, ++p->display_seq);
+    p->offered[p->display_seq % 8] = mode_packed();
+    /* The display's event bit, then the interrupt: the guest's handler reads +1014 and the page. */
+    p->regs[(0x1014 - 0x1000) / 4] |= 1;
+    hv_gicv3_pend(p->gic, p->gfx_irq);
+    if (p->m->ncpus == 1) hv_machine_wake(p->m);
+    fprintf(stderr, "hengevm: pvg-lite: display mode %ux%u (%ux%u mm, %u Hz) offered as seq %u\n", width, height, display_mm_w, display_mm_h, display_hz, p->display_seq);
+}
+
+uint32_t hv_pvg_lite_mode_acked(HvPvgLite *p) {
+    return p ? __atomic_load_n(&p->mode_acked, __ATOMIC_ACQUIRE) : 0;
+}
+
+void hv_pvg_lite_accepted_mode(HvPvgLite *p, uint32_t *width, uint32_t *height, int *monitor) {
+    uint64_t m = p ? __atomic_load_n(&p->accepted, __ATOMIC_ACQUIRE) : 0;
+    if (!m) m = mode_packed(); /* no page yet: the mode it will boot with */
+    *width = (uint32_t)(m & 0xffffff), *height = (uint32_t)(m >> 24 & 0xffffff), *monitor = (int)(m >> 48 & 1);
+}
+
 #undef PUT32
 #undef PUTF
-}
 
 static void display_ack(HvPvgLite *p, uint32_t seq) {
     uint8_t *d = p->display_pa ? hv_phys_ptr(p->m, p->display_pa, 0x4000) : NULL;
@@ -195,6 +241,10 @@ static void display_ack(HvPvgLite *p, uint32_t seq) {
     *(uint32_t *)(d + 0xfbc) = seq;
     d[0xfa9] = 0;
     *(uint32_t *)(d + 0xfc0) = 2;
+    __atomic_store_n(&p->mode_acked, seq, __ATOMIC_RELEASE);
+    if (seq && seq <= p->display_seq && p->display_seq - seq < 8) /* one still remembered */
+        __atomic_store_n(&p->accepted, p->offered[seq % 8], __ATOMIC_RELEASE);
+    if (seq > 1) fprintf(stderr, "hengevm: pvg-lite: display mode seq %u acked by the guest\n", seq);
 }
 
 static int task_read(HvPvgLite *p, uint32_t task, uint64_t off, void *to, uint32_t n);
@@ -681,6 +731,10 @@ static uint64_t gfx_read(void *opaque, uint64_t off, unsigned size) {
         break;
     case 0x1018:
         v = __atomic_exchange_n(&p->status, 0, __ATOMIC_ACQ_REL);
+        break;
+    case 0x1014: /* the display's event bits: read to clear */
+        v = p->regs[(0x1014 - 0x1000) / 4];
+        p->regs[(0x1014 - 0x1000) / 4] = 0;
         break;
     case 0x122c: v = 1; break;
     default:

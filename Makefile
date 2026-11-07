@@ -12,7 +12,7 @@ ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_present_plan $(B)/test_pvg_display
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -83,6 +83,12 @@ $(B)/test_operands: tests/test_operands.c tests/operand_cases.s $(B)/operands.o
 	$(CC) $(CFLAGS) $^ -o $@
 $(B)/test_mmu: tests/test_mmu.c $(ENGINE)
 	$(CC) $(CFLAGS) tests/test_mmu.c $(ENGINE) -o $@
+# The virtual display page: the boot mode list and the hot-plug offer of a monitor's mode (devices/pvg_lite.c).
+$(B)/test_pvg_display: tests/test_pvg_display.c $(ENGINE) $(DEV)
+	$(CC) $(CFLAGS) tests/test_pvg_display.c $(ENGINE) $(DEV) $(METAL_LIBS) -o $@
+# Where a guest frame lands on a screen of another size (devices/pvg_present.h, used by pvg_metal.m).
+$(B)/test_present_plan: tests/test_present_plan.c devices/pvg_present.h | $(B)
+	$(CC) $(CFLAGS) tests/test_present_plan.c -o $@
 
 $(B)/hvsparse: tools/hvsparse_main.c host/hvsparse.c host/hvsparse.h | $(B)
 	$(CC) $(CFLAGS) tools/hvsparse_main.c host/hvsparse.c -o $@
@@ -164,7 +170,7 @@ $(B)/test_display_targets: ios/Henge/DisplayTargetSelection.swift tests/test_dis
 	xcrun --sdk macosx swiftc $^ -o $@
 
 # The router's hand-off to the engine, with the engine call recorded instead of made.
-$(B)/test_display_router: ios/Henge/DisplayRouter.swift ios/Henge/DisplayTargetSelection.swift tests/test_display_router.swift tests/display_engine_stub.h | $(B)
+$(B)/test_display_router: ios/Henge/DisplayRouter.swift ios/Henge/DisplayTargetSelection.swift ios/Henge/DisplayModePlan.swift tests/test_display_router.swift tests/display_engine_stub.h | $(B)
 	xcrun --sdk macosx swiftc -import-objc-header tests/display_engine_stub.h $(filter %.swift,$^) -o $@
 
 # Which external screen shows the Mac before iOS 27, for any order of session and plug events.
@@ -172,14 +178,19 @@ $(B)/test_external_screen_plan: ios/Henge/ExternalScreenPlan.swift tests/test_ex
 	xcrun --sdk macosx swiftc $^ -o $@
 
 # The glue: fake screens and a real router, to check what each screen is told and what the engine draws.
-$(B)/test_legacy_external_display: ios/Henge/LegacyExternalDisplay.swift ios/Henge/ExternalScreenPlan.swift ios/Henge/MacPresentation.swift ios/Henge/DisplayRouter.swift ios/Henge/DisplayTargetSelection.swift tests/test_legacy_external_display.swift tests/display_engine_stub.h | $(B)
+$(B)/test_legacy_external_display: ios/Henge/LegacyExternalDisplay.swift ios/Henge/ExternalScreenPlan.swift ios/Henge/MacPresentation.swift ios/Henge/DisplayRouter.swift ios/Henge/DisplayTargetSelection.swift ios/Henge/DisplayModePlan.swift tests/test_legacy_external_display.swift tests/display_engine_stub.h | $(B)
 	xcrun --sdk macosx swiftc -import-objc-header tests/display_engine_stub.h $(filter %.swift,$^) -o $@
+
+# The mode and physical size an external monitor gets, so macOS renders every pixel and picks HiDPI where it should.
+$(B)/test_display_mode_plan: ios/Henge/DisplayModePlan.swift tests/test_display_mode_plan.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
 
 # Info.plist must declare the external display scene role with ExternalDisplaySceneDelegate, or iOS 17-26 never offer the display.
 $(B)/test_scene_manifest: tests/test_scene_manifest.swift | $(B)
 	xcrun --sdk macosx swiftc -parse-as-library $^ -o $@
 
-test-display-routing: $(B)/test_display_targets $(B)/test_display_router $(B)/test_external_screen_plan $(B)/test_legacy_external_display $(B)/test_scene_manifest
+test-display-routing: $(B)/test_display_targets $(B)/test_display_router $(B)/test_external_screen_plan $(B)/test_legacy_external_display $(B)/test_scene_manifest $(B)/test_display_mode_plan
+	$(B)/test_display_mode_plan
 	$(B)/test_display_targets
 	$(B)/test_display_router
 	$(B)/test_external_screen_plan

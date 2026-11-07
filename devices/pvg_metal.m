@@ -17,7 +17,9 @@
 #include <string.h>
 #include <sys/utsname.h>
 
-/* 1080p shrunk onto a phone would make a normal pointer a few dots across; an iPad's screen needs less. */
+/* The pointer's enlargement on the device's own screen (the cursor plan's phone_scale; a monitor
+   gets the guest's own size): 1080p shrunk onto a phone would make a normal pointer a few dots
+   across; an iPad's screen needs less. */
 static int cursor_scale(void) {
 #if TARGET_OS_IPHONE
     NSInteger saved = [[NSUserDefaults standardUserDefaults] integerForKey:@"henge.cursor.scale"];
@@ -43,6 +45,16 @@ static int cursor_scale(void) {
 #include <string.h>
 
 #include "pvg_lite.h"
+#include "pvg_present.h"
+
+/* Where the pointer is drawn on a W x H frame, for both drawing paths (pvg_present.h): `where` is
+   the display page's +0xe00, in the pixels of the mode the guest accepted. */
+static HvCursorPlan cursor_plan_now(HvPvgLite *lite, uint32_t W, uint32_t H, uint32_t where, uint32_t gw, uint32_t gh, int hx, int hy) {
+    uint32_t mode_w, mode_h;
+    int monitor;
+    hv_pvg_lite_accepted_mode(lite, &mode_w, &mode_h, &monitor);
+    return hv_cursor_plan(W, H, mode_w, mode_h, where & 0xffff, where >> 16, gw, gh, hx, hy, monitor, (uint32_t)cursor_scale());
+}
 
 #if !TARGET_OS_IPHONE
 #import <CoreGraphics/CoreGraphics.h>
@@ -153,7 +165,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     __weak CAMetalLayer *prepared_layer; /* presenter only: each target needs its own setup */
     id<MTLRenderPipelineState> screen_pipe, linear_pipe, cursor_pipe;
     id<MTLTexture> cursor_tex;
-    id<MTLSamplerState> screen_sampler, cursor_sampler;
+    id<MTLSamplerState> screen_sampler, screen_sampler_nearest, cursor_sampler; /* linear for a resized frame, nearest for one that lands whole; the pointer's */
     uint64_t on_screen; /* the mapping showing */
     _Atomic uint64_t gpu_frames;
     dispatch_queue_t presenter;
@@ -1864,10 +1876,9 @@ static const uint8_t *half_to_byte(void) {
         last = where;
     }
     if (where == 0xffffffff) return;
-    /* Bigger than the guest draws it. The hot spot stays where it points. */
-    const int scale = cursor_scale();
-    int x = (int)(where & 0xffff) - cursor_hot_x * scale, y = (int)(where >> 16) - cursor_hot_y * scale;
-    int cw = (int)cursor_w * scale, ch = (int)cursor_h * scale;
+    HvCursorPlan c = cursor_plan_now(lite, w, h, where, cursor_w, cursor_h, cursor_hot_x, cursor_hot_y);
+    const int scale = (int)c.scale;
+    int x = c.x, y = c.y, cw = (int)c.w, ch = (int)c.h;
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + cw > (int)w ? (int)w : x + cw, y1 = y + ch > (int)h ? (int)h : y + ch;
     if (x1 <= x0 || y1 <= y0) return;
@@ -1923,8 +1934,9 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
         screen_sampler = [device newSamplerStateWithDescriptor:sd];
         sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest;
+        screen_sampler_nearest = [device newSamplerStateWithDescriptor:sd];
         cursor_sampler = [device newSamplerStateWithDescriptor:sd];
-        if (!screen_pipe || !linear_pipe || !cursor_pipe || !screen_sampler || !cursor_sampler) { [self complain:[NSString stringWithFormat:@"screen pipelines: %@", err.localizedDescription]]; return NO; }
+        if (!screen_pipe || !linear_pipe || !cursor_pipe || !screen_sampler || !screen_sampler_nearest || !cursor_sampler) { [self complain:[NSString stringWithFormat:@"screen pipelines: %@", err.localizedDescription]]; return NO; }
     }
     // Pipelines are shared, but a newly connected monitor has a fresh layer.
     if (prepared_layer != target) {
@@ -2032,7 +2044,19 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
             if (changed) continue;
             return;
         }
-        CGSize want = CGSizeMake(W, H);
+        /* The drawable is the screen's own pixels (Apple: render at the display's exact pixel size, never
+           to be resampled) and the frame is aspect-fit inside it, nearest when it lands whole (pvg_present.h).
+           The probes read the frame's pixels back out of the drawable, so for them it stays the frame's size. */
+        static int probing = -1;
+        if (probing < 0) probing = getenv("HV_PVG_GPU_TEST") != NULL || getenv("HV_COLOR_PROBE") != NULL;
+        uint32_t screen_px_w = 0, screen_px_h = 0;
+        if (!probing) {
+            CGSize bounds = target.bounds.size;
+            CGFloat scale = target.contentsScale;
+            screen_px_w = (uint32_t)(bounds.width * scale + 0.5), screen_px_h = (uint32_t)(bounds.height * scale + 0.5);
+        }
+        HvPresentPlan plan = hv_present_plan(W, H, screen_px_w, screen_px_h);
+        CGSize want = CGSizeMake(plan.drawable_w, plan.drawable_h);
         if (!CGSizeEqualToSize(target.drawableSize, want)) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
@@ -2092,16 +2116,19 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = drawable.texture;
-        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        BOOL bars = plan.w != plan.drawable_w || plan.h != plan.drawable_h; /* black around a frame of another shape */
+        pass.colorAttachments[0].loadAction = bars ? MTLLoadActionClear : MTLLoadActionDontCare;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+        [e setViewport:(MTLViewport){plan.x, plan.y, plan.w, plan.h, 0, 1}]; /* the cursor's clip-space maths below holds within it */
         NSNumber *linearSetting = [[NSUserDefaults standardUserDefaults] objectForKey:@"henge.display.linearToSRGB"];
         BOOL convertLinear = linearSetting ? linearSetting.boolValue : YES;
         [e setRenderPipelineState:(half && convertLinear) ? linear_pipe : screen_pipe];
         float rect[4] = {-1, -1, 2, 2};
         [e setVertexBytes:rect length:sizeof rect atIndex:0];
         [e setFragmentTexture:tex atIndex:0];
-        [e setFragmentSamplerState:screen_sampler atIndex:0];
+        [e setFragmentSamplerState:plan.nearest ? screen_sampler_nearest : screen_sampler atIndex:0];
         if (half) {
             uint32_t half_mode = (uint32_t)hv_half_mode_get();
             [e setFragmentBytes:&half_mode length:sizeof half_mode atIndex:0];
@@ -2110,9 +2137,8 @@ static NSString *const screen_shaders = @"#include <metal_stdlib>\n"
         const uint8_t *page = hv_pvg_lite_display_page(lite);
         uint32_t where = page ? __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE) : 0xffffffff;
         if (ctex && where != 0xffffffff && (shown || page[0xe04])) {
-            const float scale = cursor_scale();
-            float x = (float)(where & 0xffff) - hx * scale, y = (float)(where >> 16) - hy * scale;
-            float cw = cw0 * scale, ch = ch0 * scale;
+            HvCursorPlan c = cursor_plan_now(lite, W, H, where, cw0, ch0, hx, hy);
+            float x = c.x, y = c.y, cw = c.w, ch = c.h;
             float r[4] = {x / W * 2 - 1, 1 - (y + ch) / H * 2, cw / W * 2, ch / H * 2};
             [e setRenderPipelineState:cursor_pipe];
             [e setVertexBytes:r length:sizeof r atIndex:0];
